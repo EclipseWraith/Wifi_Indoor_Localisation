@@ -133,8 +133,3 @@ python3 indoor_nav.py --algo wknn --demo --k 5
 3. **Update graph constraints**: Edit `BLOCKED_EDGE_PATTERNS` in the server file to match your building's walls
 4. **Run the server**: `python3 app_knn.py`
 
----
-
-## License
-
-MIT
