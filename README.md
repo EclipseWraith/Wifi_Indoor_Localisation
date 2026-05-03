@@ -1,194 +1,140 @@
-# Wireless Indoor Localization and Navigation System
+# 📍 WiFi Indoor Localization & Navigation
 
-**Using WiFi RSSI Fingerprinting with Multiple Localization Models**
+A real-time indoor positioning and navigation system using WiFi RSSI fingerprinting. The system compares multiple machine learning approaches — **TF-IDF Cosine KNN**, **Random Forest**, **WKNN**, and **Bayesian** — and deploys the best models as Flask web servers with interactive map dashboards.
 
-*Course Project Report — Wireless Networks (WN)*
-*4th Floor, R&D Building Deployment*
-
----
-
-## Abstract
-
-Indoor localization remains a challenging problem as GNSS (GPS) is ineffective indoors due to signal attenuation and multipath propagation through walls and ceilings. This project presents a complete end-to-end wireless indoor localization and navigation system deployed on the **4th floor of the R&D building**.
-
-The system employs **WiFi Received Signal Strength Indicator (RSSI) fingerprinting** as its primary sensing modality. We implement and deploy two distinct localization models, each with its own Flask-based navigation server:
-
-1. **Model A — TF-IDF Cosine Similarity KNN**: Uses IDF-weighted cosine similarity over a probabilistic radio map, achieving a best mean LOLO error of **3.51 m** across 27 candidate configurations (*K = 3, γ = 4*).
-
-2. **Model B — Stacked Random Forest + Gradient Boosting Ensemble**: Employs a two-layer stacking architecture with 300-tree Random Forest and 200-tree Gradient Boosting base learners, a Ridge meta-learner, and engineered RSSI features (MinMax normalization, presence masks, visibility statistics).
-
-Both models share a common navigation subsystem that represents the floor as a weighted graph, applies **Dijkstra's shortest-path algorithm**, and generates **turn-by-turn navigation instructions**. Position estimates are stabilized through a confidence-adaptive **Exponential Moving Average (EMA)** filter with history averaging.
-
-**Keywords**: WiFi fingerprinting, indoor localization, TF-IDF, cosine similarity, KNN, Random Forest, Gradient Boosting, stacking ensemble, Dijkstra, Flask, RSSI
+> GPS doesn't work indoors. This system uses the WiFi signals already around you to determine your location with meter-level accuracy.
 
 ---
 
-## System Architecture
-
-The system is divided into two temporal phases and three functional subsystems:
+## How It Works
 
 ```
-Data Collection → parse_fingerprints.py → build_prob_map.py → probabilistic_map.pkl
-                                                                        ↓
-Client WiFi Scan → /api/locate (Flask) → CosineKNN / RF predict() → EMA Filter → Nearest Node Snap
-                                                                                         ↓
-                                                              /api/navigate → Dijkstra Routing → Web Dashboard
+┌─────────────┐     ┌──────────────┐     ┌────────────────┐     ┌─────────────────┐
+│ Android App │────▶│ Flask Server │────▶│  ML Prediction │────▶│  Web Dashboard  │
+│  WiFi Scan  │     │  /api/locate │     │  + EMA Filter  │     │  Live Map + Nav │
+└─────────────┘     └──────────────┘     └────────────────┘     └─────────────────┘
 ```
 
-### Offline Training Phase
-Team members physically visited **136 reference locations** across the 4th floor. At each location, a WiFi scanning tool recorded the BSSID and RSSI of each visible access point, together with *(x, y)* coordinates and a human-readable label. Multiple scans were collected across separate sessions to capture temporal variability (**912 total samples**, **500 unique BSSIDs**).
-
-### Online Inference Phase
-During live operation, the Android client sends a raw `{BSSID: RSSI}` dictionary to `/api/locate`. The backend invokes the active model, feeds the result through the multi-stage smoothing pipeline, and returns the estimated *(x, y)*, nearest graph node, confidence score, and filter metadata.
-
-### Web Dashboard Frontend
-The Flask server serves an interactive **HTML5 Canvas dashboard** with:
-- Pan (drag) and zoom (scroll / pinch) support
-- Animated blue dot using LERP interpolation at 12% per `requestAnimationFrame` tick
-- Active route highlighted in red
-- Turn-by-turn directions below the map
-- Auto-polling at **500 ms** intervals with no page reload
+1. **Offline Phase**: Walk through the building collecting WiFi scans at known locations → builds a fingerprint database
+2. **Online Phase**: Phone sends a live WiFi scan → server predicts your (x, y) position using the trained model → dashboard shows your location on an interactive map
+3. **Navigation**: Select a destination → Dijkstra's algorithm computes the shortest walkable path → turn-by-turn directions guide you there
 
 ---
 
-## Methodology
+## Benchmark Results
 
-### Coordinate System & Floor Graph
-A metric coordinate system is defined with the **elevator at the origin (0, 0)**. All distances are in meters, measured physically by walking the floor.
+5-fold cross-validation on 912 samples across 136 locations (500 unique BSSIDs):
 
-The navigation graph *G = (V, E)* is automatically constructed from the fingerprint dataset. Two layers of physical constraints prevent wall-crossing routes:
-1. **Blocked node list**: structural obstacles (pillars) excluded entirely
-2. **Blocked edge list**: 30+ explicitly forbidden node pairs preventing edges through walls, rooms, and impassable segments
+| Algorithm | Mean Error | Median Error | < 2 unit Accuracy |
+|-----------|:---------:|:------------:|:-----------------:|
+| **Random Forest** | **3.36** | **2.21** | **44.5%** |
+| Bayesian | 6.47 | 4.24 | 21.5% |
+| WKNN (K=3) | 6.28 | 4.27 | 21.2% |
+| KNN (K=3) | 6.86 | 4.74 | 17.1% |
 
-Each node connects to at most **3 nearby neighbors** within *d_max = 4.0 m*.
+*Run `python3 indoor_nav.py --benchmark --k 3` to reproduce.*
 
-### WiFi RSSI Fingerprint Data Collection
-- **BSSID** is used exclusively (not SSID) because all institutional APs share common SSIDs like `eduroam`
-- Each physical AP broadcasts **5–6 virtual BSSIDs** across radio bands
-- Missing BSSIDs in a scan are filled with a sentinel of **−100 dBm**
+The **Cosine KNN** model (served by `app_knn.py`) uses a separate TF-IDF weighted probabilistic map with exponential similarity sharpening, achieving best real-world performance due to its robustness against cross-device signal strength variation.
 
-### Localization Algorithms
+---
 
-#### Model A: TF-IDF Cosine Similarity KNN
-Addresses two key problems:
-- **Cross-device magnitude variation**: Cosine similarity is invariant to overall signal strength scaling
-- **Uninformative ubiquitous APs**: IDF weighting automatically suppresses floor-wide APs
+## Features
 
-```
-IDF(a) = log(N / (df(a) + 1))
-v_ℓ,a = (μ_ℓ,a − r_min) · IDF(a)
-cos(q', v_ℓ) = q̂' · v̂_ℓ
-```
-
-The top-*K* locations are selected and the predicted position is their exponentially-sharpened similarity-weighted centroid (*K = 3, γ = 4*).
-
-#### Model B: Stacked Random Forest + Gradient Boosting Ensemble
-- **Base models**: Two 300-tree RF regressors + two 200-tree GB regressors
-- **Feature engineering**: MinMax-normalized RSSI, binary presence mask, element-wise product, visible AP count, mean/std RSSI
-- **Meta-learner**: Ridge regression trained on Out-Of-Fold predictions (5-fold CV)
-- **Optional IMU dead reckoning** for position stabilization between scans
-
-### Position Smoothing Pipeline
-
-```
-Raw Prediction → First-Fix Init → Confidence-Adaptive EMA → History Averaging → Nearest Node Snap
-                                     α_eff = α₀ · c           last 5 predictions
-                                     jump damp if > 8m         0.6 EMA + 0.4 hist
-```
-
-- **α₀ = 0.35** balances responsiveness and stability
-- **δ_max = 8.0 m** jump threshold prevents teleportation from outlier predictions
-- **Arrival validation**: Location confirmed only after **10 consecutive readings** within 2.5 m
+- **Two deployable servers** — Cosine KNN (`app_knn.py`, port 5001) and Random Forest (`app_rf.py`, port 5002)
+- **Real-time positioning** with confidence-adaptive EMA smoothing
+- **Interactive map** — pan, zoom, pinch-to-zoom on mobile
+- **Dijkstra navigation** with turn-by-turn directions
+- **Arrival validation** — confirms destination reached after 10 consecutive readings within 2.5m
+- **Graph constraints** — 30+ blocked edges prevent routes through walls
+- **Dark-mode UI** — glassmorphism dashboard optimized for mobile browsers
 
 ---
 
 ## Project Structure
 
 ```
-├── app_knn.py              # Model A server with live dashboard (Port 5001)
-├── app_rf.py               # Model B server with live dashboard (Port 5002)
-├── indoor_nav.py           # Core algorithms (WKNN, KNN, Bayesian, Random Forest)
-├── build_prob_map.py       # Generates probabilistic_map.pkl from fingerprints
-├── benchmark.py            # Cross-validation benchmarking suite
-├── knn.py                  # Cosine KNN engine with TF-IDF weighting
-├── fingerprints_imu.json   # Primary fingerprint dataset (912 samples, 136 locations)
-├── probabilistic_map.pkl   # Pre-computed probabilistic radio map
-├── floorplan.png           # Building floor plan reference
-└── WN_Project.pdf          # Full project report
+├── app_knn.py              # Cosine KNN server + dashboard (port 5001)
+├── app_rf.py               # Random Forest server + dashboard (port 5002)
+├── indoor_nav.py           # All algorithms: WKNN, KNN, Bayesian, Random Forest
+├── knn.py                  # TF-IDF Cosine KNN engine
+├── build_prob_map.py       # Builds probabilistic radio map from fingerprints
+├── benchmark.py            # Extended benchmarking suite
+├── fingerprints_imu.json   # Fingerprint dataset (912 samples, 136 locations)
+├── probabilistic_map.pkl   # Pre-computed probabilistic map for Cosine KNN
+└── floorplan.png           # Floor plan reference image
 ```
 
 ---
 
-## Quick Start
+## Getting Started
 
-### Prerequisites
+### Install dependencies
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install flask numpy scikit-learn
 ```
 
-### Run Model A — Cosine KNN Server (Recommended)
+### Run the Cosine KNN server
 ```bash
 python3 app_knn.py
 ```
-Dashboard: `http://localhost:5001`
 
-### Run Model B — Random Forest Server
+### Run the Random Forest server
 ```bash
 python3 app_rf.py
 ```
-Dashboard: `http://localhost:5002`
 
-### Run Benchmarks
+Open the dashboard URL on any device connected to the same WiFi network.
+
+### Run benchmarks
 ```bash
 python3 indoor_nav.py --benchmark --k 3
 ```
 
-> **Note**: Open the dashboard URL on your phone (same WiFi network) for real-time localization.
+### Test a single prediction
+```bash
+python3 indoor_nav.py --algo rf --demo
+python3 indoor_nav.py --algo wknn --demo --k 5
+```
 
 ---
 
-## REST API Endpoints
+## API Reference
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/locate` | POST | Submit WiFi scan for localization |
-| `/api/current` | GET | Get current estimated position |
-| `/api/navigate` | POST | Get Dijkstra path between two nodes |
-| `/api/graph` | GET | Full navigation graph (nodes + edges) |
-| `/api/nodes` | GET | Navigable destination list |
-| `/api/reset` | POST | Reset position state |
+| `/api/locate` | `POST` | Submit `{"networks": {"BSSID": RSSI}}` for localization |
+| `/api/current` | `GET` | Current estimated position + confidence |
+| `/api/navigate` | `POST` | `{"from": "node", "to": "node"}` → Dijkstra path |
+| `/api/graph` | `GET` | Full navigation graph (nodes + edges) |
+| `/api/nodes` | `GET` | List of navigable destinations |
+| `/api/reset` | `POST` | Reset position state |
 
 ---
 
-## Challenges & Lessons Learned
+## Key Design Decisions
 
-- **Android WiFi throttling**: API 28+ limits scans to 4 per 2-minute window; EMA smoothing mitigates this
-- **BSSID vs SSID**: All institutional APs share SSIDs (`eduroam`), making SSID completely uninformative; BSSID is essential
-- **Wall-crossing routes**: Naively connecting nearby nodes produced impossible paths; resolved with dual-constraint system (30+ blocked edges)
-- **TF-IDF insight**: Ubiquitous APs contributed noise until IDF weighting suppressed them, shifting attention to location-specific APs
-- **Signal aliasing at A-420**: Localized degradation due to structural interference and multipath fading; highlights need for additional modalities like BLE beacons
-
----
-
-## Future Work
-
-- Incremental map updates to reduce recalibration overhead
-- Additional modalities (BLE beacons, visual odometry) fused with WiFi RSSI
-- Automatic blocked-edge detection from architectural floor plans
-- Multi-floor navigation with elevator state detection
+- **BSSID over SSID** — Institutional APs share common SSIDs (e.g., `eduroam`), making SSID useless for localization. BSSID uniquely identifies each radio interface.
+- **TF-IDF weighting** — Suppresses ubiquitous APs visible floor-wide that add noise, boosting location-specific APs that carry discriminative signal.
+- **Cosine similarity** — Invariant to absolute signal magnitude, making the model robust across different phone hardware.
+- **Position smoothing** — Three-stage pipeline (first-fix → confidence-adaptive EMA → history averaging) prevents jitter and outlier teleportation.
+- **Arrival debounce** — Requires 10 consecutive sub-2.5m readings before confirming arrival, preventing false positives from signal spikes.
 
 ---
 
-## Team
+## Adapting to Your Building
 
-| Member | Contribution |
-|--------|-------------|
-| **Piyush Aggarwal** | Dataset collection; Cosine KNN similarity model |
-| **Arvind Dhavala** | Dataset collection; KNN + IMU model |
-| **Anant Gyan Singhal** | Dataset collection; Random Forest model |
-| **Saksham Kakkar** | Dataset collection; Unweighted Euclidean KNN (K=3, K=5) |
-| **Harshit Tandon** | Dataset collection; WKNN model |
+1. **Collect fingerprints**: Walk through your building, recording WiFi scans at known (x, y) locations. Save as JSON with format:
+   ```json
+   [{"x": 5.0, "y": 3.2, "label": "Room 101", "networks": {"AA:BB:CC:DD:EE:FF": -65, ...}}, ...]
+   ```
+2. **Build the probabilistic map**: `python3 build_prob_map.py`
+3. **Update graph constraints**: Edit `BLOCKED_EDGE_PATTERNS` in the server file to match your building's walls
+4. **Run the server**: `python3 app_knn.py`
 
-*Note: The application backend and web dashboard frontend were partially developed using AI assistance.*
+---
+
+## License
+
+MIT
